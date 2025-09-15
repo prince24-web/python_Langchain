@@ -1,13 +1,12 @@
-import os
-from typing_extensions import TypedDict, Annotated
+import os, datetime
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
-from typing import Optional
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 import getpass
 
+# Load API key
 load_dotenv()
-
 if not os.getenv("GEMINI_API_KEY"):
     os.environ["GEMINI_API_KEY"] = getpass.getpass("Enter your Gemini API key: ")
 
@@ -15,39 +14,99 @@ llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash",
     google_api_key=os.getenv("GEMINI_API_KEY")
 )
-
 print("✅ Gemini model initialized successfully")
 
-class Story(TypedDict):
-    """Story generator"""
-    title: Annotated[str, ..., "The title of the story"]
-    characters: Annotated[list[str], ..., "The characters of the story"]
-    plot: Annotated[str, ..., "The plot of the story"]
-    moral: Annotated[Optional[str], None, "The moral of the story"]
+# --- Define tools ---
+def joke(setup: str, punchline: str, rating: int):
+    return {"setup": setup, "punchline": punchline, "rating": rating}
 
-system = """You are a comedian storyteller. Always respond with a structured funny story
-in JSON format that follows the FunnyStory schema.
+def get_time():
+    return {"time": datetime.datetime.now().strftime("%H:%M:%S")}
 
-Here are some examples of funny stories:
+def add_numbers(a: int, b: int):
+    return {"result": a + b}
 
-example_user: Tell me a funny story about pirates
-example_assistant: {{"title": "The Forgetful Pirate", "characters": ["Captain Clumsy", "Parrot Pete"], "plot": "Captain Clumsy kept forgetting where he buried his treasure. Every time he marked the spot, Parrot Pete stole the X and flew off with it!", "moral": "Always keep your notes safe… especially from parrots."}}
+# --- Few-shot examples ---
+examples = [
+    HumanMessage("Tell me a joke about cats", name="example_user"),
+    AIMessage(
+        "",
+        name="example_assistant",
+        tool_calls=[{
+            "name": "joke",
+            "args": {
+                "setup": "Why was the cat so good at video games?",
+                "punchline": "Because it had nine lives!",
+                "rating": 8,
+            },
+            "id": "1"
+        }],
+    ),
+    ToolMessage("", tool_call_id="1"),
 
-example_user: Tell me a funny story about robots
-example_assistant: {{"title": "RoboBob Learns to Dance", "characters": ["RoboBob", "Professor Sparks"], "plot": "RoboBob tried salsa dancing, but each time the music sped up, his circuits overheated and smoke came out of his ears. The audience still gave him a standing ovation.", "moral": "Even robots need to take it one step at a time."}}
+    HumanMessage("What time is it", name="example_user"),
+    AIMessage(
+        "",
+        name="example_assistant",
+        tool_calls=[{
+            "name": "get_time",
+            "args": {},
+            "id": "2"
+        }],
+    ),
+    ToolMessage("", tool_call_id="2"),
 
-example_user: Tell me a funny story about woodpeckers
-example_assistant: {{"title": "The Musical Woodpecker", "characters": ["Woody", "Grandma Tree"], "plot": "Woody decided to drum on Grandma Tree to start a band. The forest animals thought it was a rock concert and showed up with glow sticks!", "moral": "Even the smallest drummer can make a big noise."}}
+    HumanMessage("Add 5 and 7", name="example_user"),
+    AIMessage(
+        "",
+        name="example_assistant",
+        tool_calls=[{
+            "name": "add_numbers",
+            "args": {"a": 5, "b": 7},
+            "id": "3"
+        }],
+    ),
+    ToolMessage("", tool_call_id="3"),
+]
+
+# --- Prompt ---
+system = """You are a funny but useful assistant. 
+You can tell jokes, give the current time, or do simple math using the correct tool calls.
 """
 
 prompt = ChatPromptTemplate.from_messages([
-    ("system",system),
-    ("human","{input}")
+    ("system", system),
+    ("placeholder", "{examples}"),
+    ("human", "{input}")
 ])
 
-structured_llm = llm.with_structured_output(Story)
+structured_llm = llm
+few_shot_tool_llm = prompt | structured_llm
 
-few_shot_structured_llm = prompt | structured_llm
+# --- Run query ---
+response = few_shot_tool_llm.invoke({
+    "input": "Can you add 10 and 25?",
+    "examples": examples
+})
 
-for chunk in few_shot_structured_llm.stream({"input" : "tell me a story about robots"}):
-    print(chunk, end="", flush=True)
+print("🤖 Model response:", response)
+
+# --- Post-process tool call ---
+if hasattr(response, "tool_calls") and response.tool_calls:
+    for call in response.tool_calls:
+        tool_name = call["name"]
+        args = call["args"]
+
+        if tool_name == "add_numbers":
+            result = add_numbers(**args)
+        elif tool_name == "joke":
+            result = joke(**args)
+        elif tool_name == "get_time":
+            result = get_time()
+        else:
+            result = {"error": f"Unknown tool: {tool_name}"}
+
+        print(f"✅ Tool executed: {tool_name} →", result)
+else:
+    print("⚠️ No tool calls found.")
+
